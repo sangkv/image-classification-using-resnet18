@@ -1,0 +1,154 @@
+import os
+import copy
+from tqdm import tqdm
+from PIL import Image
+
+import torch
+from torch import nn
+from torch import optim
+from torchvision import transforms, models
+from torch.utils.data import Dataset, DataLoader
+
+# Check GPU
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# 1. Data
+# Transforms
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Resize((224, 224)),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+# Dataset & DataLoader
+# Dataset Class
+class CatDogDataset(Dataset):
+    def __init__(self, dir, transform = None):
+        self.dir = dir
+        self.transform = transform
+        self.list_dir_images = os.listdir(dir)
+    
+    def __len__(self):
+        return len(self.list_dir_images)
+    
+    def __getitem__(self, index):
+        name = self.list_dir_images[index].split('.')[0]
+        label = 0 if name == 'cat' else 1
+
+        image_path = os.path.join(self.dir, self.list_dir_images[index])
+        image = Image.open(image_path)
+
+        if self.transform is not None:
+            image = self.transform(image)
+        
+        return image, label
+
+# Prepare data and dataloader
+TRAIN_PATH = './data/train/'
+VAL_PATH = './data/val/'
+train_data = CatDogDataset(TRAIN_PATH, transform)
+val_data = CatDogDataset(VAL_PATH, transform)
+
+NUM_BATCH = 32
+train_dl = DataLoader(train_data, batch_size=NUM_BATCH, shuffle=True)
+val_dl = DataLoader(val_data, batch_size=NUM_BATCH)
+
+# 2. Model
+# Initialize ResNet18
+# Import Pretrained model
+model = models.resnet18(pretrained=True)
+
+# Freeze weights
+for param in model.parameters():
+    param.requires_grad = False
+
+# Finetune the last fully connected layer to prefered output
+num_features = model.fc.in_features
+model.fc = nn.Sequential(*[
+    nn.Linear(in_features=num_features, out_features=2),
+    nn.LogSoftmax(dim=1)
+])
+
+model = model.to(DEVICE)
+print(model)
+
+# 3. Train
+# Functions
+# Validation Function
+def validate(model, data):
+    total = 0
+    correct = 0
+
+    for i, (images, labels) in tqdm(enumerate(data)):
+        images = images.to(DEVICE)
+        labels = labels.to(DEVICE)
+
+        outputs = model(images)
+        _, preds = torch.max(outputs, 1)
+
+        total += outputs.size(0)
+        correct += torch.sum(preds == labels)
+        
+    return correct.item() * 100 / total
+
+# Train Function
+def train(model, criterion, optimizer, epochs=5):
+    model.train()
+
+    max_accuracy = 0
+    best_model = copy.deepcopy(model)
+
+    for epoch in range(epochs):
+        for i, (images, labels) in tqdm(enumerate(train_dl)):
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            _, preds = torch.max(outputs, 1)
+
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+        
+        val_accuracy = validate(model, val_dl)
+        if val_accuracy > max_accuracy:
+            best_model = copy.deepcopy(model)
+            max_accuracy = val_accuracy
+            print('saving best model with val_accuracy: ', val_accuracy)
+        print('Epoch: ', epoch+1, ', val_accuracy: ', val_accuracy, '%')
+    
+    # Save Best Model
+    torch.save(best_model.state_dict(), './weights/ResNet18_CatDog.pth')
+
+# Train the model
+criterion = nn.NLLLoss()
+optimizer = optim.Adam(model.fc.parameters(), lr=0.001)
+train(model=model, criterion=criterion, optimizer=optimizer, epochs=3)
+
+# 4. Test
+# Temporarily use set VAL as set TEST
+def test(model, data):
+    model.eval()
+
+    total = 0
+    correct = 0
+
+    for i, (images, labels) in tqdm(enumerate(data)):
+        with torch.no_grad():
+            images = images.to(DEVICE)
+            labels = labels.to(DEVICE)
+
+            outputs = model(images)
+            #_, preds = torch.max(outputs, 1)
+            preds = torch.argmax(outputs, dim=1)
+
+            total += outputs.size(0)
+            correct += torch.sum(preds == labels)
+        
+    print('Test accuracy: ', correct.item() * 100 / total)
+
+# Test
+test(model, val_dl)
+
+
