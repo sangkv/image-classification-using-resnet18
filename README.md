@@ -10,7 +10,6 @@ pip install -r requirements.txt
 python predict.py
 
 ## Train:
-
 ### Step 1:
 python transfer-learning.py
 
